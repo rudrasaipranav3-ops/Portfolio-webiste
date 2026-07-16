@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Aether — Particle Sphere</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --fg: #e8e6e1;
+    --dim: #7a7770;
+    --accent: #d9c9a8;
+    --bg: #0a0a0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, system-ui, sans-serif; }
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
+  #video {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; transform: scaleX(-1);
+    z-index: 0; opacity: 0; transition: opacity .5s ease;
+    pointer-events: none; filter: brightness(0.55) contrast(1.05);
+  }
+  #video.show { opacity: 1; }
+  #particles { z-index: 2; }
+  #hands { z-index: 3; pointer-events: none; }
+  .ui { position: fixed; z-index: 10; color: var(--fg); user-select: none; }
+  #title {
+    top: 22px; left: 28px;
+    font-family: 'Cormorant Garamond', 'Playfair Display', Georgia, serif;
+    font-weight: 300; font-size: 34px; letter-spacing: 0.5px;
+  }
+  #title .sub {
+    display: block; margin-top: 2px;
+    font-family: 'Inter', sans-serif; font-size: 10px; letter-spacing: 4px;
+    color: var(--dim); text-transform: uppercase;
+  }
+  #hud {
+    top: 24px; right: 28px; text-align: right;
+    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--dim); line-height: 1.7;
+  }
+  #hud b { color: var(--fg); font-weight: 500; }
+  #legend {
+    bottom: 24px; left: 28px;
+    font-size: 10.5px; letter-spacing: 1.2px; color: var(--dim); line-height: 1.8;
+    max-width: 320px;
+  }
+  #legend span { color: var(--fg); }
+  #controls {
+    bottom: 24px; right: 28px;
+    display: flex; gap: 10px; align-items: center;
+  }
+  button.btn {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: var(--fg);
+    padding: 10px 16px;
+    font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+    cursor: pointer; backdrop-filter: blur(8px);
+    transition: all .2s ease;
+    font-family: inherit;
+  }
+  button.btn:hover { background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.25); }
+  button.btn.active { background: var(--fg); color: #000; }
+  #status {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 12px; letter-spacing: 3px; color: var(--dim); z-index: 20;
+    text-transform: uppercase;
+  }
+  .fade-out { opacity: 0; transition: opacity 1s ease; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="particles"></canvas>
+  <canvas id="hands"></canvas>
+</div>
+
+<div id="title" class="ui">
+  Aether
+  <span class="sub">Particle Field · 001</span>
+</div>
+
+<div id="hud" class="ui">
+  <div>Hands · <b id="hCount">0</b></div>
+  <div>Fingers · <b id="fCount">0</b></div>
+  <div>Radius · <b id="rVal">1.00</b></div>
+  <div>State · <b id="sVal">idle</b></div>
+</div>
+
+<div id="legend" class="ui">
+  <div><span>One hand</span> — move & rotate</div>
+  <div><span>Pinch & hold</span> — charge, release to explode</div>
+  <div><span>Two hands</span> — spread to scale sphere</div>
+  <div><span>Finger count</span> — shift particle hue</div>
+</div>
+
+<div id="controls" class="ui">
+  <button class="btn" id="camBtn">Camera Background</button>
+</div>
+
+<div id="status">Initializing camera…</div>
+
+<!-- MediaPipe Hands via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+/* ---------- Setup ---------- */
+const pCanvas = document.getElementById('particles');
+const hCanvas = document.getElementById('hands');
+const pctx = pCanvas.getContext('2d');
+const hctx = hCanvas.getContext('2d');
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const hCountEl = document.getElementById('hCount');
+const fCountEl = document.getElementById('fCount');
+const rValEl = document.getElementById('rVal');
+const sValEl = document.getElementById('sVal');
+const camBtn = document.getElementById('camBtn');
+
+let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  for (const c of [pCanvas, hCanvas]) {
+    c.width = W * DPR; c.height = H * DPR;
+    c.style.width = W + 'px'; c.style.height = H + 'px';
+  }
+  pctx.setTransform(DPR,0,0,DPR,0,0);
+  hctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------- Particle sphere ---------- */
+const PARTICLE_COUNT = 3000;
+const particles = [];
+
+// Fibonacci sphere for even distribution
+function initParticles() {
+  particles.length = 0;
+  const phi = Math.PI * (Math.sqrt(5) - 1);
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const y = 1 - (i / (PARTICLE_COUNT - 1)) * 2;
+    const r = Math.sqrt(1 - y*y);
+    const t = phi * i;
+    const x = Math.cos(t) * r;
+    const z = Math.sin(t) * r;
+    particles.push({
+      // home position on unit sphere
+      hx: x, hy: y, hz: z,
+      // current position
+      x: x, y: y, z: z,
+      // velocity for explosion
+      vx: 0, vy: 0, vz: 0,
+    });
+  }
+}
+initParticles();
+
+/* ---------- State ---------- */
+const state = {
+  // sphere transform
+  cx: 0, cy: 0, // screen offset from center (px)
+  targetCx: 0, targetCy: 0,
+  radius: 220, // base sphere radius px
+  targetRadius: 220,
+  rotX: 0, rotY: 0,
+  targetRotX: 0, targetRotY: 0,
+  autoRotY: 0,
+
+  // color / hue
+  hue: 40, // warm default
+  targetHue: 40,
+
+  // pinch charge
+  charging: false,
+  chargeStart: 0,
+  chargeLevel: 0, // 0..1
+  chargeX: 0, chargeY: 0,
+
+  // explosion
+  exploding: false,
+  explosionTime: 0,
+
+  // hand data
+  hands: [],
+  fingerCount: 0,
+};
+
+/* ---------- Camera + MediaPipe ---------- */
+const hands = new Hands({
+  locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6,
+});
+hands.onResults(onHandsResults);
+
+const camera = new Camera(video, {
+  onFrame: async () => { await hands.send({ image: video }); },
+  width: 1280, height: 720,
+});
+
+camera.start().then(() => {
+  statusEl.classList.add('fade-out');
+  setTimeout(() => statusEl.remove(), 1200);
+}).catch(err => {
+  statusEl.textContent = 'Camera unavailable — ' + err.message;
+});
+
+/* ---------- Helpers ---------- */
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+
+function countExtendedFingers(lm, handedness) {
+  // lm: 21 landmarks with .x .y .z (normalized 0..1)
+  // Simple heuristic: tip.y < pip.y => extended (for fingers). Thumb uses x depending on handedness.
+  let count = 0;
+  // Fingers: index(8 vs 6), middle(12 vs 10), ring(16 vs 14), pinky(20 vs 18)
+  const pairs = [[8,6],[12,10],[16,14],[20,18]];
+  for (const [tip, pip] of pairs) {
+    if (lm[tip].y < lm[pip].y - 0.02) count++;
+  }
+  // Thumb: tip(4) vs ip(3). Mirrored because video is mirrored — use handedness label from mediapipe.
+  // handedness comes as "Left"/"Right" for original camera view; after mirror, it looks flipped.
+  const thumbTip = lm[4], thumbIp = lm[3];
+  if (handedness === 'Right') {
+    if (thumbTip.x < thumbIp.x - 0.02) count++;
+  } else {
+    if (thumbTip.x > thumbIp.x + 0.02) count++;
+  }
+  return count;
+}
+
+function onHandsResults(results) {
+  const list = [];
+  if (results.multiHandLandmarks && results.multiHandedness) {
+    for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+      const lm = results.multiHandLandmarks[i];
+      const hd = results.multiHandedness[i].label; // "Left"/"Right"
+      // Convert normalized landmarks to screen coords (mirrored X)
+      const pts = lm.map(p => ({
+        x: (1 - p.x) * W,
+        y: p.y * H,
+        z: p.z,
+      }));
+      // Pinch: thumb tip (4) vs index tip (8)
+      const pinchDist = dist(pts[4].x, pts[4].y, pts[8].x, pts[8].y);
+      // Palm center approx = wrist(0) avg with middle_mcp(9)
+      const cx = (pts[0].x + pts[9].x) / 2;
+      const cy = (pts[0].y + pts[9].y) / 2;
+      const fingers = countExtendedFingers(lm, hd);
+      list.push({ pts, pinchDist, cx, cy, hd, fingers, lm });
+    }
+  }
+  state.hands = list;
+  state.fingerCount = list.reduce((a,h) => a + h.fingers, 0);
+  hCountEl.textContent = list.length;
+  fCountEl.textContent = state.fingerCount;
+}
+
+/* ---------- Interaction logic each frame ---------- */
+function updateInteraction() {
+  const hs = state.hands;
+
+  // Reference size for pinch scaling (fraction of screen)
+  const pinchNorm = (d) => d / Math.min(W, H);
+
+  if (hs.length === 1) {
+    const h = hs[0];
+    // Move sphere toward palm center
+    state.targetCx = h.cx - W/2;
+    state.targetCy = h.cy - H/2;
+
+    // Rotation from palm relative offset (subtle)
+    const nx = (h.cx / W) - 0.5;
+    const ny = (h.cy / H) - 0.5;
+    state.targetRotY = nx * 2.2;
+    state.targetRotX = -ny * 1.6;
+
+    // Pinch detection
+    const pinch = pinchNorm(h.pinchDist);
+    const isPinch = pinch < 0.06;
+    if (isPinch && !state.exploding) {
+      if (!state.charging) {
+        state.charging = true;
+        state.chargeStart = performance.now();
+      }
+      const elapsed = (performance.now() - state.chargeStart) / 1000;
+      state.chargeLevel = Math.min(elapsed / 1.2, 1);
+      state.chargeX = (h.pts[4].x + h.pts[8].x) / 2;
+      state.chargeY = (h.pts[4].y + h.pts[8].y) / 2;
+      sValEl.textContent = 'charging';
+    } else if (state.charging) {
+      // Released
+      triggerExplosion(state.chargeLevel);
+      state.charging = false;
+      state.chargeLevel = 0;
+    }
+  } else if (hs.length === 2) {
+    // Two hands: center between palms, radius from distance
+    const a = hs[0], b = hs[1];
+    const midx = (a.cx + b.cx) / 2;
+    const midy = (a.cy + b.cy) / 2;
+    state.targetCx = midx - W/2;
+    state.targetCy = midy - H/2;
+
+    const d = dist(a.cx, a.cy, b.cx, b.cy);
+    const norm = d / Math.min(W, H); // ~0 to ~1
+    state.targetRadius = Math.max(60, Math.min(500, norm * 500));
+
+    // Rotation slight based on tilt between palms
+    const angle = Math.atan2(b.cy - a.cy, b.cx - a.cx);
+    state.targetRotX = Math.sin(angle) * 0.5;
+    state.targetRotY = Math.cos(angle) * 0.5;
+
+    // cancel charge on two hands
+    if (state.charging) { state.charging = false; state.chargeLevel = 0; }
+    sValEl.textContent = 'scaling';
+  } else {
+    // No hands — drift back to center, gentle auto rotate
+    state.targetCx *= 0.9; state.targetCy *= 0.9;
+    state.targetRotX *= 0.95;
+    if (state.charging) { state.charging = false; state.chargeLevel = 0; }
+    if (!state.exploding) sValEl.textContent = 'idle';
+  }
+
+  // Color by finger count
+  const fc = state.fingerCount;
+  // Map 0..10 fingers to hue palette
+  const palette = [40, 20, 340, 300, 260, 220, 190, 160, 130, 90, 60];
+  state.targetHue = palette[Math.min(fc, palette.length - 1)];
+
+  // Smooth
+  const lerp = (a, b, t) => a + (b - a) * t;
+  state.cx = lerp(state.cx, state.targetCx, 0.12);
+  state.cy = lerp(state.cy, state.targetCy, 0.12);
+  state.radius = lerp(state.radius, state.targetRadius, 0.08);
+  state.rotX = lerp(state.rotX, state.targetRotX, 0.08);
+  state.rotY = lerp(state.rotY, state.targetRotY, 0.08);
+  state.hue = lerp(state.hue, state.targetHue, 0.06);
+  state.autoRotY += 0.0025;
+
+  rValEl.textContent = (state.radius / 220).toFixed(2);
+}
+
+/* ---------- Explosion ---------- */
+function triggerExplosion(power) {
+  state.exploding = true;
+  state.explosionTime = performance.now();
+  sValEl.textContent = 'explode';
+  const strength = 8 + power * 22;
+  const cx = state.chargeX - W/2 - state.cx;
+  const cy = state.chargeY - H/2 - state.cy;
+  for (const p of particles) {
+    // radial direction from explosion origin (approx in screen space)
+    // Use particle current relative pos plus random 3D jitter
+    const dx = (p.x * state.radius) - cx * 0.4;
+    const dy = (p.y * state.radius) - cy * 0.4;
+    const dz = p.z * state.radius;
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const jx = (Math.random() - 0.5) * 0.6;
+    const jy = (Math.random() - 0.5) * 0.6;
+    const jz = (Math.random() - 0.5) * 0.6;
+    p.vx = (dx/len + jx) * strength * (0.6 + Math.random()*0.8);
+    p.vy = (dy/len + jy) * strength * (0.6 + Math.random()*0.8);
+    p.vz = (dz/len + jz) * strength * (0.6 + Math.random()*0.8);
+  }
+  setTimeout(() => { state.exploding = false; sValEl.textContent = 'reform'; }, 1400);
+}
+
+/* ---------- Rendering ---------- */
+function renderParticles() {
+  // Trail effect: semi-transparent clear
+  pctx.fillStyle = 'rgba(10,10,11,0.35)';
+  pctx.fillRect(0, 0, W, H);
+
+  const cx = W/2 + state.cx;
+  const cy = H/2 + state.cy;
+  const R = state.radius;
+
+  const rotY = state.rotY + state.autoRotY;
+  const rotX = state.rotX;
+  const sinY = Math.sin(rotY), cosY = Math.cos(rotY);
+  const sinX = Math.sin(rotX), cosX = Math.cos(rotX);
+
+  const hue = state.hue;
+  const now = performance.now();
+
+  // Reforming lerp toward home position (velocity decays)
+  const reforming = !state.exploding; // once state.exploding=false, reform
+  const dt = 1;
+
+  // Sort-less rendering; use depth for alpha/size
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+
+    if (state.exploding) {
+      // Free particles: integrate velocity in "unit space" then scale
+      p.x += p.vx * 0.02;
+      p.y += p.vy * 0.02;
+      p.z += p.vz * 0.02;
+      p.vx *= 0.985; p.vy *= 0.985; p.vz *= 0.985;
+    } else {
+      // Reform toward home
+      const k = 0.06;
+      p.vx = (p.vx + (p.hx - p.x) * k) * 0.9;
+      p.vy = (p.vy + (p.hy - p.y) * k) * 0.9;
+      p.vz = (p.vz + (p.hz - p.z) * k) * 0.9;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.z += p.vz;
+    }
+
+    // rotate around Y then X
+    let x = p.x, y = p.y, z = p.z;
+    let x1 = x * cosY + z * sinY;
+    let z1 = -x * sinY + z * cosY;
+    let y2 = y * cosX - z1 * sinX;
+    let z2 = y * sinX + z1 * cosX;
+
+    // scale to sphere radius
+    const px = cx + x1 * R;
+    const py = cy + y2 * R;
+
+    // depth-based size & alpha
+    const depth = (z2 + 1) / 2; // 0 back, 1 front
+    const size = 0.6 + depth * 2.4;
+    const alpha = 0.15 + depth * 0.75;
+
+    // color: hue with slight per-particle variation
+    const l = 45 + depth * 25;
+    pctx.fillStyle = `hsla(${hue + (i % 30) - 15}, 65%, ${l}%, ${alpha})`;
+    pctx.beginPath();
+    pctx.arc(px, py, size, 0, Math.PI * 2);
+    pctx.fill();
+  }
+}
+
+function renderHandsOverlay() {
+  hctx.clearRect(0, 0, W, H);
+  for (const h of state.hands) {
+    // Draw subtle dots for landmarks
+    hctx.fillStyle = 'rgba(232,230,225,0.55)';
+    for (const pt of h.pts) {
+      hctx.beginPath();
+      hctx.arc(pt.x, pt.y, 2.2, 0, Math.PI*2);
+      hctx.fill();
+    }
+    // connections (fingers)
+    const cons = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [5,9],[9,10],[10,11],[11,12],
+      [9,13],[13,14],[14,15],[15,16],
+      [13,17],[17,18],[18,19],[19,20],[0,17]
+    ];
+    hctx.strokeStyle = 'rgba(232,230,225,0.25)';
+    hctx.lineWidth = 1;
+    hctx.beginPath();
+    for (const [a,b] of cons) {
+      hctx.moveTo(h.pts[a].x, h.pts[a].y);
+      hctx.lineTo(h.pts[b].x, h.pts[b].y);
+    }
+    hctx.stroke();
+  }
+
+  // Charge ring
+  if (state.charging && state.chargeLevel > 0) {
+    const x = state.chargeX, y = state.chargeY;
+    const rBase = 44;
+    // background ring
+    hctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    hctx.lineWidth = 3;
+    hctx.beginPath();
+    hctx.arc(x, y, rBase, 0, Math.PI*2);
+    hctx.stroke();
+    // fill arc
+    const grd = hctx.createLinearGradient(x-rBase, y, x+rBase, y);
+    grd.addColorStop(0, `hsla(${state.hue}, 80%, 65%, 0.95)`);
+    grd.addColorStop(1, `hsla(${state.hue + 40}, 80%, 70%, 0.95)`);
+    hctx.strokeStyle = grd;
+    hctx.lineWidth = 3;
+    hctx.lineCap = 'round';
+    hctx.beginPath();
+    hctx.arc(x, y, rBase, -Math.PI/2, -Math.PI/2 + Math.PI*2*state.chargeLevel);
+    hctx.stroke();
+
+    // inner glow dot
+    hctx.fillStyle = `hsla(${state.hue}, 80%, 70%, ${0.3 + state.chargeLevel*0.6})`;
+    hctx.beginPath();
+    hctx.arc(x, y, 6 + state.chargeLevel * 10, 0, Math.PI*2);
+    hctx.fill();
+  }
+}
+
+/* ---------- Loop ---------- */
+function frame() {
+  updateInteraction();
+  renderParticles();
+  renderHandsOverlay();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------- Camera toggle ---------- */
+let camShown = false;
+camBtn.addEventListener('click', () => {
+  camShown = !camShown;
+  video.classList.toggle('show', camShown);
+  camBtn.classList.toggle('active', camShown);
+});
+</script>
+</body>
+</html>
